@@ -128,27 +128,25 @@ bot.onText(/\/help/, (msg) => {
 /plan — план месяца
 /meetings — встречи
 
-*Добавить задачу:*
-\`/addtask Название | Кто | приоритет\`
-Пример: \`/addtask Позвонить Beshqozon | АМ | high\`
+📊 *KPI отчёт:*
+/kpi — заполнить показатели за сегодня
+/kpireport — сводный отчёт по KPI
+/kpiplan — план на месяц
+/setplan calls 150 — обновить план
 
-*Закрыть задачу:*
-\`/done ID\` — например /done 5
+✅ *Задачи:*
+/addtask Название | Кто | приоритет
+/done ID — закрыть задачу
 
-*Добавить встречу:*
-\`/addmeeting Название | дата время | контакт | ответственный\`
-Пример: \`/addmeeting Демо Uzum | 2026-05-10 14:00 | Хасан | КФ\`
+📅 *Встречи:*
+/addmeeting Название | дата | контакт | ответственный
+/donemeet ID — встреча проведена
 
-*Закрыть встречу:*
-\`/donemeet ID\` — например /donemeet 3
+📈 *Метрики дня:*
+/log лиды звонки встречи демо оплата
 
-*Внести метрики:*
-\`/log лиды звонки встречи демо оплата\`
-Пример: \`/log 4 15 2 1 10\`
-
-*Добавить клиента:*
-\`/addclient Название | сумма | менеджер\`
-Пример: \`/addclient Uzum Market | 20 | КФ\`
+🏢 *Клиенты:*
+/addclient Название | сумма | менеджер
 `, { parse_mode: 'Markdown' });
 });
 
@@ -200,7 +198,7 @@ bot.onText(/\/today/, async (msg) => {
     if (todayMeetings.length) {
       text += `📅 *Встречи сегодня:*\n`;
       todayMeetings.forEach(m => {
-        const time = new Date(m.meeting_date).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+        const time = new Date(m.meeting_date).toLocaleTimeString('ru-RU', { timeZone: 'Asia/Tashkent', hour: '2-digit', minute: '2-digit' });
         text += `🕐 ${time} — ${m.title} (${m.contact || '—'})\n`;
       });
       text += '\n';
@@ -273,17 +271,22 @@ bot.onText(/\/addmeeting (.+)/, async (msg, match) => {
   let meetingDate = null;
   if (dateStr) {
     try {
-      // Парсим дату в формате YYYY-MM-DD HH:MM или DD.MM HH:MM
       let d;
       if (dateStr.includes('-')) {
-        d = new Date(dateStr + ':00+05:00');
+        // Формат: 2026-05-10 14:00 — считаем как UTC+5
+        d = new Date(dateStr.trim().replace(' ', 'T') + ':00.000+05:00');
       } else if (dateStr.includes('.')) {
-        const [datePart, timePart] = dateStr.split(' ');
-        const [day, month] = datePart.split('.');
-        const year = new Date().getFullYear();
-        d = new Date(`${year}-${month.padStart(2,'0')}-${day.padStart(2,'0')}T${timePart || '10:00'}:00+05:00`);
+        // Формат: 10.05 14:00 или 10.05.2026 14:00
+        const parts2 = dateStr.trim().split(' ');
+        const datePart = parts2[0];
+        const timePart = parts2[1] || '10:00';
+        const dateParts = datePart.split('.');
+        const day = dateParts[0].padStart(2,'0');
+        const month = dateParts[1].padStart(2,'0');
+        const year = dateParts[2] || new Date().getFullYear();
+        d = new Date(`${year}-${month}-${day}T${timePart}:00.000+05:00`);
       } else {
-        d = new Date(dateStr);
+        d = new Date(dateStr.trim() + '+05:00');
       }
       if (!isNaN(d.getTime())) meetingDate = d.toISOString();
     } catch(e) {
@@ -304,7 +307,7 @@ bot.onText(/\/addmeeting (.+)/, async (msg, match) => {
     bot.sendMessage(chatId, '❌ Ошибка: ' + error.message);
   } else {
     const dateDisplay = meetingDate
-      ? new Date(meetingDate).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' })
+      ? new Date(meetingDate).toLocaleDateString('ru-RU', { timeZone: 'Asia/Tashkent', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' })
       : 'дата не указана';
 
     bot.sendMessage(chatId, `
@@ -538,9 +541,9 @@ bot.onText(/\/meetings/, async (msg) => {
   let text = `📅 *Предстоящие встречи:*\n\n`;
   meetings.forEach(m => {
     const dt = m.meeting_date ? new Date(m.meeting_date) : null;
-    const dateStr = dt ? dt.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—';
+    const dateStr2 = dt ? dt.toLocaleDateString('ru-RU', { timeZone: 'Asia/Tashkent', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—';
     text += `📍 *${m.title}*\n`;
-    text += `🕐 ${dateStr}\n`;
+    text += `🕐 ${dateStr2}\n`;
     if (m.contact) text += `👤 ${m.contact}\n`;
     if (m.person) text += `👨‍💼 ${m.person}\n`;
     text += '\n';
@@ -557,7 +560,286 @@ function stageLabel(s) {
   return map[s] || s;
 }
 
-// ── АВТОМАТИЧЕСКИЕ НАПОМИНАНИЯ (CRON) ─────────────
+// ── KPI ДИАЛОГ ────────────────────────────────────
+// Состояние диалога для каждого пользователя
+const kpiSessions = {};
+
+const KPI_METRICS = [
+  { key: 'calls',        label: 'Количество звонков',    emoji: '📞' },
+  { key: 'leads_meta',   label: 'Лиды Meta',             emoji: '📘' },
+  { key: 'leads_google', label: 'Лиды Google',           emoji: '🔍' },
+  { key: 'organic',      label: 'Органический трафик',   emoji: '🌱' },
+  { key: 'qualified',    label: 'Квалификация',           emoji: '✅' },
+  { key: 'demo',         label: 'Демо',                  emoji: '🎯' },
+  { key: 'deals',        label: 'Сделки',                emoji: '🤝' },
+  { key: 'avg_check',    label: 'Средний чек (сум)',     emoji: '💰' },
+  { key: 'conversion',   label: 'Конверсия (%)',         emoji: '📊' },
+  { key: 'revenue',      label: 'Выручка (сум)',         emoji: '💵' },
+];
+
+// Запустить диалог заполнения KPI
+async function startKpiDialog(chatId, person) {
+  const plans = await getKpiPlans();
+  kpiSessions[chatId] = {
+    step: 0,
+    data: {},
+    person: person,
+    plans: plans
+  };
+  await sendKpiQuestion(chatId);
+}
+
+async function sendKpiQuestion(chatId) {
+  const session = kpiSessions[chatId];
+  if (!session) return;
+
+  const metric = KPI_METRICS[session.step];
+  if (!metric) {
+    await saveKpiData(chatId);
+    return;
+  }
+
+  const plan = session.plans[metric.key] || 0;
+  const planText = plan > 0 ? `\n📋 План на месяц: *${formatNum(plan)}*` : '';
+
+  await bot.sendMessage(chatId, `
+${metric.emoji} *${metric.label}*${planText}
+
+Введите факт за сегодня (или 0 если нет данных):
+_Шаг ${session.step + 1} из ${KPI_METRICS.length}_
+`, {
+    parse_mode: 'Markdown',
+    reply_markup: {
+      keyboard: [['0'], ['Пропустить'], ['❌ Отмена']],
+      resize_keyboard: true,
+      one_time_keyboard: true
+    }
+  });
+}
+
+async function saveKpiData(chatId) {
+  const session = kpiSessions[chatId];
+  if (!session) return;
+
+  const day = new Date().getDate();
+  const person = session.person;
+
+  // Сохраняем все метрики
+  for (const [metric, value] of Object.entries(session.data)) {
+    await sb.from('kpi_logs').upsert({
+      month_id: CURRENT_MONTH,
+      day,
+      metric,
+      value: parseFloat(value) || 0,
+      person
+    }, { onConflict: 'month_id,day,metric,person' });
+  }
+
+  // Считаем итоги
+  const plans = session.plans;
+  let summary = `✅ *Отчёт за ${day} мая сохранён!*\n\n`;
+  summary += `👤 Сотрудник: ${person}\n\n`;
+
+  for (const metric of KPI_METRICS) {
+    const val = session.data[metric.key];
+    if (val === undefined) continue;
+    const plan = plans[metric.key] || 0;
+    const fact = parseFloat(val) || 0;
+    const pct = plan > 0 ? Math.round((fact / plan) * 100) : 0;
+    const icon = pct >= 100 ? '✅' : pct >= 70 ? '🟡' : '🔴';
+    summary += `${icon} ${metric.emoji} ${metric.label}: *${formatNum(fact)}* / ${formatNum(plan)} (${pct}%)\n`;
+  }
+
+  delete kpiSessions[chatId];
+
+  await bot.sendMessage(chatId, summary, {
+    parse_mode: 'Markdown',
+    reply_markup: { remove_keyboard: true }
+  });
+
+  // Уведомить кофаундера если заполнял другой сотрудник
+  if (chatId !== 5307832046) {
+    try {
+      await bot.sendMessage(5307832046, `📊 *${person} заполнил отчёт за ${day} мая*\n\n${summary}`, { parse_mode: 'Markdown' });
+    } catch(e) {}
+  }
+}
+
+async function getKpiPlans() {
+  const { data } = await sb.from('kpi_plans').select('*').eq('month_id', CURRENT_MONTH);
+  const result = {};
+  (data || []).forEach(p => result[p.metric] = p.plan_value);
+  return result;
+}
+
+function formatNum(n) {
+  if (n >= 1000000) return (n / 1000000).toFixed(1) + ' млн';
+  if (n >= 1000) return (n / 1000).toFixed(0) + 'к';
+  return n.toString();
+}
+
+// /kpi — начать заполнение KPI
+bot.onText(/\/kpi/, async (msg) => {
+  const chatId = msg.chat.id;
+  if (!isAllowed(chatId)) return deny(chatId);
+
+  // Найти имя сотрудника по chat_id
+  const personMap = {
+    5307832046: 'КФ',
+    // добавьте: 123456789: 'СМ',
+  };
+  const person = personMap[chatId] || 'Команда';
+
+  await bot.sendMessage(chatId, `
+📊 *Заполнение KPI за сегодня*
+
+Отвечайте на каждый вопрос числом.
+Нажмите "0" если показатель равен нулю.
+Нажмите "Пропустить" чтобы не заполнять показатель.
+
+Начинаем!
+`, { parse_mode: 'Markdown' });
+
+  await startKpiDialog(chatId, person);
+});
+
+// /kpiplan — посмотреть/обновить план на месяц
+bot.onText(/\/kpiplan/, async (msg) => {
+  const chatId = msg.chat.id;
+  if (!isAllowed(chatId)) return deny(chatId);
+
+  const plans = await getKpiPlans();
+  let text = `📋 *План KPI на ${CURRENT_MONTH === 'may26' ? 'Май 2026' : CURRENT_MONTH}:*\n\n`;
+
+  KPI_METRICS.forEach((m, i) => {
+    text += `${i + 1}. ${m.emoji} ${m.label}: *${formatNum(plans[m.key] || 0)}*\n`;
+  });
+
+  text += '\n_Чтобы обновить план: /setplan метрика значение_';
+  text += '\n_Пример: /setplan calls 150_';
+
+  bot.sendMessage(chatId, text, { parse_mode: 'Markdown' });
+});
+
+// /setplan — обновить план
+bot.onText(/\/setplan (\w+) ([\d.]+)/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  if (!isAllowed(chatId)) return deny(chatId);
+
+  const metric = match[1];
+  const value = parseFloat(match[2]);
+
+  const validMetrics = KPI_METRICS.map(m => m.key);
+  if (!validMetrics.includes(metric)) {
+    return bot.sendMessage(chatId, `❌ Неизвестный показатель: ${metric}\n\nДоступные: ${validMetrics.join(', ')}`);
+  }
+
+  await sb.from('kpi_plans').upsert({
+    month_id: CURRENT_MONTH,
+    metric,
+    plan_value: value
+  }, { onConflict: 'month_id,metric' });
+
+  const m = KPI_METRICS.find(x => x.key === metric);
+  bot.sendMessage(chatId, `✅ План обновлён!\n${m.emoji} ${m.label}: *${formatNum(value)}*`, { parse_mode: 'Markdown' });
+});
+
+// /kpireport — отчёт по KPI за месяц
+bot.onText(/\/kpireport/, async (msg) => {
+  const chatId = msg.chat.id;
+  if (!isAllowed(chatId)) return deny(chatId);
+
+  const [plans, logs] = await Promise.all([
+    getKpiPlans(),
+    sb.from('kpi_logs').select('*').eq('month_id', CURRENT_MONTH).then(r => r.data || [])
+  ]);
+
+  // Суммируем факт по каждой метрике
+  const facts = {};
+  logs.forEach(l => {
+    if (!facts[l.metric]) facts[l.metric] = 0;
+    facts[l.metric] += l.value;
+  });
+
+  const today = new Date().getDate();
+  let text = `📊 *KPI отчёт — ${today} мая*\n\n`;
+  text += `${'Показатель'.padEnd(20)} | План | Факт | %\n`;
+  text += '─'.repeat(40) + '\n';
+
+  let allGood = true;
+  for (const metric of KPI_METRICS) {
+    const plan = plans[metric.key] || 0;
+    const fact = facts[metric.key] || 0;
+    const pct = plan > 0 ? Math.round((fact / plan) * 100) : 0;
+    const icon = pct >= 100 ? '✅' : pct >= 70 ? '🟡' : '🔴';
+    if (pct < 70) allGood = false;
+    text += `${icon} ${metric.emoji} *${metric.label}*\n`;
+    text += `   ${formatNum(fact)} / ${formatNum(plan)} = ${pct}%\n`;
+  }
+
+  text += `\n${allGood ? '🎉 Все показатели в норме!' : '⚠️ Есть отставания — нужно ускориться!'}`;
+
+  bot.sendMessage(chatId, text, { parse_mode: 'Markdown' });
+});
+
+// Обработка ответов в диалоге KPI
+bot.on('message', async (msg) => {
+  const chatId = msg.chat.id;
+  if (!isAllowed(chatId)) return;
+  if (!kpiSessions[chatId]) return;
+  if (msg.text && msg.text.startsWith('/')) return;
+
+  const session = kpiSessions[chatId];
+  const text = msg.text || '';
+
+  if (text === '❌ Отмена') {
+    delete kpiSessions[chatId];
+    await bot.sendMessage(chatId, '❌ Заполнение отменено', { reply_markup: { remove_keyboard: true } });
+    return;
+  }
+
+  const metric = KPI_METRICS[session.step];
+
+  if (text !== 'Пропустить') {
+    const value = parseFloat(text.replace(',', '.'));
+    if (!isNaN(value)) {
+      session.data[metric.key] = value;
+    } else {
+      await bot.sendMessage(chatId, '❌ Введите число. Попробуйте ещё раз:');
+      return;
+    }
+  }
+
+  session.step++;
+
+  if (session.step >= KPI_METRICS.length) {
+    await saveKpiData(chatId);
+  } else {
+    await sendKpiQuestion(chatId);
+  }
+});
+
+// ── CRON: Запрос отчёта в 17:00 ──────────────────
+// Каждый день в 17:00 (UTC+5 = 12:00 UTC)
+cron.schedule('0 12 * * 1-6', async () => {
+  console.log('📋 Запрос KPI отчёта...');
+  for (const userId of ALLOWED_USERS) {
+    try {
+      await bot.sendMessage(userId, `
+📊 *Время заполнить KPI за сегодня!*
+
+Нажмите /kpi чтобы начать заполнение.
+Займёт 2-3 минуты.
+
+_Данные сразу появятся на дашборде_
+`, { parse_mode: 'Markdown' });
+    } catch (e) {
+      console.error('Ошибка запроса KPI для', userId, e.message);
+    }
+  }
+});
+
+
 
 // Утренняя сводка каждый день в 9:00 (UTC+5 = 4:00 UTC)
 cron.schedule('0 4 * * 1-5', async () => {
@@ -653,7 +935,7 @@ cron.schedule('*/15 * * * *', async () => {
     // Если встреча через 45-75 минут — отправляем напоминание
     const diff = meetTime - now;
     if (diff > 45 * 60 * 1000 && diff < 75 * 60 * 1000) {
-      const timeStr = meetTime.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+      const timeStr = meetTime.toLocaleTimeString('ru-RU', { timeZone: 'Asia/Tashkent', hour: '2-digit', minute: '2-digit' });
       for (const userId of ALLOWED_USERS) {
         try {
           await bot.sendMessage(userId, `
